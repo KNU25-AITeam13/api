@@ -1,0 +1,3 @@
+[submodule "ai/food_classification"]
+	path = ai/food_classification
+	url = https://github.com/KNU25-AITeam13/Food_Classification
