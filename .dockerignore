@@ -47,7 +47,6 @@ htmlcov/
 
 # uv
 .uv/
-uv.lock
 
 # 이미 다운로드한 체크포인트는 포함 (빌드 시 재다운로드 방지)
 # ai/depth_pro/checkpoints/depth_pro.pt
