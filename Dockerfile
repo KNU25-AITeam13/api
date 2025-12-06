@@ -17,7 +17,7 @@ COPY . /app
 
 # Install the application dependencies.
 WORKDIR /app
-RUN uv sync --locked --no-cache
+RUN uv sync --locked
 
 # Download Depth Pro checkpoint (빌드 타임)
 # 이미 포함되어 있으면 스킵됨
