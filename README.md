@@ -13,6 +13,14 @@ git clone --recurse-submodules <repository-url>
 git submodule update --init --recursive
 ```
 
+## 서브모듈 업데이트
+
+서브모듈을 최신 커밋으로 업데이트하려면 다음 명령어를 사용하세요:
+
+```bash
+git submodule update --remote --merge
+```
+
 ## 서브모듈 추가 방법
 
 새로운 서브모듈을 추가하려면 다음 명령어를 사용하세요:
