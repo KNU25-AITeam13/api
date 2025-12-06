@@ -1,3 +1,9 @@
 [submodule "ai/food_classification"]
 	path = ai/food_classification
 	url = https://github.com/KNU25-AITeam13/Food_Classification
+[submodule "ai/depth_pro"]
+	path = ai/depth_pro
+	url = https://github.com/apple/ml-depth-pro
+[submodule "ai/volume_assumption"]
+	path = ai/volume_assumption
+	url = https://github.com/KNU25-AITeam13/Volume_Assume

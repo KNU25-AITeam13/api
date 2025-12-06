@@ -12,3 +12,12 @@ git clone --recurse-submodules <repository-url>
 # 이미 클론한 경우 서브모듈 업데이트
 git submodule update --init --recursive
 ```
+
+## 서브모듈 추가 방법
+
+새로운 서브모듈을 추가하려면 다음 명령어를 사용하세요:
+
+```bash
+git submodule add <repository-url> <path>
+git commit -m "Add submodule <name>"
+```
