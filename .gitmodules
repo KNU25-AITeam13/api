@@ -4,3 +4,6 @@
 [submodule "ai/volume_assumption"]
 	path = ai/volume_assumption
 	url = https://github.com/KNU25-AITeam13/Volume_Assume
+[submodule "ai/depth_pro"]
+	path = ai/depth_pro
+	url = https://github.com/KNU25-AITeam13/Depth_Pro
