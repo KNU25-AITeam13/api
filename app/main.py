@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
 import sys
 from pathlib import Path
+import json
+import asyncio
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
 import torch
 
@@ -11,8 +13,8 @@ import torch
 sys.path.append(str(Path(__file__).parent.parent))
 
 from ai.pipeline import FoodAnalyzer
-from app.models import AnalysisResponse, ErrorResponse, NutritionInfo
-from app.utils import save_upload_file, cleanup_temp_file, validate_image_file
+from app.models import AnalysisResponse, ErrorResponse, NutritionInfo, ProgressUpdate
+from app.utils import save_upload_file, cleanup_temp_file, validate_image_file, dict_to_camel_case
 from config.config import settings
 
 
@@ -171,6 +173,88 @@ async def analyze_food(
         # 임시 파일 정리
         if temp_path:
             cleanup_temp_file(temp_path)
+
+
+@app.post(
+    "/analyze-stream",
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid request"},
+        500: {"model": ErrorResponse, "description": "Server error"}
+    },
+    tags=["Analysis"]
+)
+async def analyze_food_stream(
+    request: Request,
+    file: UploadFile = File(..., description="음식 이미지 파일 (JPG, PNG)")
+):
+    """
+    음식 이미지를 분석하면서 진행 상황을 Server-Sent Events로 스트리밍합니다.
+
+    - **file**: 음식 사진 (JPG 또는 PNG)
+
+    반환값 (SSE 스트림):
+    - **진행 상황**: step, message, status (in_progress)
+    - **최종 결과**: status (completed), result (AnalysisResponse)
+    - **에러**: status (error), message
+    """
+    # 파일 검증
+    validate_image_file(file)
+
+    temp_path = None
+
+    async def event_generator():
+        nonlocal temp_path
+
+        try:
+            # 임시 파일 저장
+            temp_path = await save_upload_file(file)
+
+            # 이미지 유효성 검증
+            try:
+                img = Image.open(temp_path)
+                img.verify()
+            except Exception as e:
+                error_data = dict_to_camel_case({"status": "error", "message": f"Invalid or corrupted image: {str(e)}"})
+                yield f"data: {json.dumps(error_data)}\n\n"
+                return
+
+            # FoodAnalyzer 실행 (스트리밍 모드)
+            analyzer = request.app.state.analyzer
+
+            try:
+                for progress in analyzer.analyze_stream(temp_path):
+                    # SSE 형식으로 데이터 전송 (camelCase 변환)
+                    camel_progress = dict_to_camel_case(progress)
+                    yield f"data: {json.dumps(camel_progress)}\n\n"
+                    # 비동기 처리를 위한 짧은 대기
+                    await asyncio.sleep(0)
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                error_data = dict_to_camel_case({"status": "error", "message": f"Model inference failed: {str(e)}"})
+                yield f"data: {json.dumps(error_data)}\n\n"
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error_data = dict_to_camel_case({"status": "error", "message": f"Unexpected error: {str(e)}"})
+            yield f"data: {json.dumps(error_data)}\n\n"
+
+        finally:
+            # 임시 파일 정리
+            if temp_path:
+                cleanup_temp_file(temp_path)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Nginx 버퍼링 비활성화
+        }
+    )
 
 
 @app.exception_handler(Exception)

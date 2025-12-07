@@ -2,12 +2,18 @@
 FastAPI 응답 모델 (Pydantic 스키마)
 """
 
-from typing import Optional
-from pydantic import BaseModel, Field, field_validator
+from typing import Optional, Literal
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic.alias_generators import to_camel
 
 
 class NutritionInfo(BaseModel):
     """영양소 정보 (확장)"""
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True
+    )
 
     # 핵심 영양소 (필수)
     calories_kcal: float = Field(..., ge=0, description="열량 (kcal)")
@@ -41,6 +47,25 @@ class NutritionInfo(BaseModel):
 class AnalysisResponse(BaseModel):
     """음식 분석 결과"""
 
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        json_schema_extra={
+            "example": {
+                "foodName": "비빔밥",
+                "confidence": 0.94,
+                "volumeMl": 350.50,
+                "massG": 350.50,
+                "nutrition": {
+                    "caloriesKcal": 525.75,
+                    "proteinG": 28.04,
+                    "fatG": 17.53,
+                    "carbsG": 87.63
+                }
+            }
+        }
+    )
+
     food_name: str = Field(..., description="음식 이름")
     confidence: float = Field(..., ge=0, le=1, description="분류 신뢰도 (0~1)")
     volume_ml: float = Field(..., ge=0, description="부피 (ml)")
@@ -53,24 +78,28 @@ class AnalysisResponse(BaseModel):
         """소수점 2자리로 반올림"""
         return round(v, 2)
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "food_name": "비빔밥",
-                "confidence": 0.94,
-                "volume_ml": 350.50,
-                "mass_g": 350.50,
-                "nutrition": {
-                    "calories_kcal": 525.75,
-                    "protein_g": 28.04,
-                    "fat_g": 17.53,
-                    "carbs_g": 87.63
-                }
-            }
-        }
-
 
 class ErrorResponse(BaseModel):
     """에러 응답"""
 
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True
+    )
+
     detail: str = Field(..., description="에러 메시지")
+
+
+class ProgressUpdate(BaseModel):
+    """진행 상황 업데이트 (SSE용)"""
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True
+    )
+
+    step: int = Field(..., ge=1, le=4, description="현재 단계 (1~4)")
+    total_steps: int = Field(4, description="전체 단계 수")
+    message: str = Field(..., description="진행 상황 메시지")
+    status: Literal["in_progress", "completed", "error"] = Field(..., description="상태")
+    result: Optional[AnalysisResponse] = Field(None, description="최종 결과 (완료 시)")

@@ -100,6 +100,96 @@ class FoodAnalyzer:
 
         print("[FoodAnalyzer] All models loaded successfully!")
 
+    def analyze_stream(self, image_path: str):
+        """
+        음식 이미지를 분석하면서 진행 상황을 스트리밍합니다.
+
+        Args:
+            image_path: 이미지 파일 경로
+
+        Yields:
+            각 단계의 진행 상황 dict 또는 최종 결과
+        """
+        print(f"\n[FoodAnalyzer] Analyzing image (streaming): {image_path}")
+        print("=" * 60)
+
+        try:
+            # Step 1: Food Classification
+            yield {"step": 1, "message": "음식 분류 중...", "status": "in_progress"}
+            print("[1/4] Running Food Classification...")
+            food_result = predict_single(self.food_model, image_path)
+            food_name = food_result.get('top1_class', 'Unknown')
+            confidence = food_result.get('top1_confidence', 0.0)
+            print(f"  → Detected: {food_name} (confidence: {confidence:.2%})")
+
+            # Step 2: Depth Map 생성
+            yield {"step": 2, "message": "깊이 맵 생성 중...", "status": "in_progress"}
+            print("[2/4] Generating Depth Map with Depth Pro...")
+            image, _, f_px = depth_pro.load_rgb(image_path)
+            image_tensor = self.depth_transform(image).to(self.device)
+
+            with torch.no_grad():
+                prediction = self.depth_model.infer(image_tensor, f_px=f_px)
+
+            depth_map = prediction["depth"].cpu().numpy()
+            focallength_px = prediction["focallength_px"]
+            f_px_val = focallength_px.item() if focallength_px is not None else None
+            print(f"  → Depth map shape: {depth_map.shape}")
+            if f_px_val:
+                print(f"  → Focal length (px): {f_px_val:.1f}")
+
+            # Step 3: YOLO Segmentation
+            yield {"step": 3, "message": "객체 분할 중...", "status": "in_progress"}
+            print("[3/4] Running YOLO Segmentation...")
+            detected_refs, food_mask, bg_candidate_mask = self._run_yolo_segmentation(
+                image_path, depth_map.shape
+            )
+
+            # Step 4: 부피 계산 및 영양소 분석
+            yield {"step": 4, "message": "부피 계산 및 영양소 분석 중...", "status": "in_progress"}
+            print("[4/4] Calculating Volume...")
+            ref_px_len, ref_real_cm, is_fallback = self._detect_reference_object(detected_refs)
+
+            density = self.nutrition_db.get_density(food_name)
+
+            vol_result = volume_calculation_core(
+                Z_scene=depth_map,
+                food_mask=food_mask,
+                bg_candidate_mask=bg_candidate_mask,
+                ref_px_len=ref_px_len,
+                ref_real_cm=ref_real_cm,
+                density_g_per_ml=density,
+                is_fallback_mode=is_fallback,
+                provided_f_px=f_px_val
+            )
+
+            print(f"  → Density: {density:.2f} g/ml")
+            print(f"  → Volume: {vol_result['volume_ml']:.1f} ml")
+            print(f"  → Mass: {vol_result['mass_g']:.1f} g")
+            print(f"  → Method: {vol_result['method']}")
+
+            nutrition = self._calculate_nutrition(food_name, vol_result['mass_g'])
+
+            print("=" * 60)
+            print("[FoodAnalyzer] Analysis complete!\n")
+
+            # 최종 결과 전송
+            result = {
+                'food_name': food_name,
+                'confidence': confidence,
+                'volume_ml': vol_result['volume_ml'],
+                'mass_g': vol_result['mass_g'],
+                'nutrition': nutrition
+            }
+
+            yield {"status": "completed", "result": result}
+
+        except Exception as e:
+            print(f"[FoodAnalyzer] Error during analysis: {e}")
+            import traceback
+            traceback.print_exc()
+            yield {"status": "error", "message": str(e)}
+
     def analyze(self, image_path: str) -> dict:
         """
         음식 이미지를 분석하여 영양 정보를 추정합니다.

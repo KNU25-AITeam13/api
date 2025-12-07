@@ -5,6 +5,7 @@ FastAPI 유틸리티 함수
 import os
 import tempfile
 from pathlib import Path
+from typing import Any, Dict
 from fastapi import UploadFile, HTTPException, status
 import aiofiles
 
@@ -103,3 +104,35 @@ def validate_image_file(upload_file: UploadFile) -> None:
                 detail=f"Invalid file extension: {ext}. "
                        f"Allowed extensions: {', '.join(allowed_exts)}"
             )
+
+
+def to_camel_case(snake_str: str) -> str:
+    """
+    snake_case 문자열을 camelCase로 변환합니다.
+
+    Args:
+        snake_str: snake_case 문자열
+
+    Returns:
+        camelCase 문자열
+    """
+    components = snake_str.split('_')
+    return components[0] + ''.join(x.title() for x in components[1:])
+
+
+def dict_to_camel_case(data: Any) -> Any:
+    """
+    딕셔너리의 모든 키를 snake_case에서 camelCase로 재귀적으로 변환합니다.
+
+    Args:
+        data: 변환할 데이터 (dict, list, 또는 기타)
+
+    Returns:
+        camelCase 키를 가진 데이터
+    """
+    if isinstance(data, dict):
+        return {to_camel_case(k): dict_to_camel_case(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [dict_to_camel_case(item) for item in data]
+    else:
+        return data
