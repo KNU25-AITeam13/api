@@ -134,6 +134,39 @@ The `volume_calculation_core` function uses `provided_f_px` parameter to pass De
 - Nutrition database: `nutrition_db_path` (default: `ai/nutrition/nutrition.db`)
 - Supports `.env` file overrides
 
+### Concurrent Request Handling
+
+**Thread-Safe Design** (`ai/pipeline.py`):
+- Uses `asyncio.Lock` for safe concurrent request handling
+- PyTorch model inference runs in dedicated `ThreadPoolExecutor` (max_workers=1)
+- Requests are queued and processed sequentially to prevent race conditions
+- Both `analyze()` and `analyze_stream()` are async methods with lock protection
+
+**Implementation Details**:
+```python
+class FoodAnalyzer:
+    def __init__(...):
+        self._lock = asyncio.Lock()  # Protects model access
+        self._executor = ThreadPoolExecutor(max_workers=1)  # Single worker for sequential processing
+
+    async def analyze(self, image_path: str) -> dict:
+        async with self._lock:  # Only one request processes at a time
+            # Run blocking PyTorch inference in executor
+            result = await loop.run_in_executor(self._executor, self._inference_sync, ...)
+```
+
+**Behavior**:
+- Multiple concurrent requests are accepted by FastAPI
+- Requests wait in queue when another request is processing
+- GPU/CPU resources are protected from simultaneous access
+- No memory conflicts or race conditions
+- Executor cleanly shuts down with `analyzer.shutdown()` in lifespan
+
+**Trade-offs**:
+- Sequential processing (one request at a time) prevents GPU memory conflicts
+- Higher throughput requires horizontal scaling (multiple instances) rather than parallel processing
+- Simple implementation with predictable resource usage
+
 ### Response Schema
 
 **Pydantic Models** (`app/models.py`):

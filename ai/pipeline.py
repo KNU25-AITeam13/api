@@ -15,6 +15,8 @@ import numpy as np
 import torch
 import cv2
 import urllib.request
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 # Submodule paths
 current_dir = Path(__file__).parent
@@ -63,6 +65,11 @@ class FoodAnalyzer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[FoodAnalyzer] Using device: {self.device}")
 
+        # 동시성 제어를 위한 Lock
+        self._lock = asyncio.Lock()
+        # Blocking 작업을 위한 ThreadPoolExecutor
+        self._executor = ThreadPoolExecutor(max_workers=1)
+
         # 0. Depth Pro 체크포인트 확인 및 다운로드
         checkpoint_path = self._ensure_depth_pro_checkpoint()
 
@@ -100,7 +107,74 @@ class FoodAnalyzer:
 
         print("[FoodAnalyzer] All models loaded successfully!")
 
-    def analyze_stream(self, image_path: str):
+    def shutdown(self):
+        """리소스 정리"""
+        print("[FoodAnalyzer] Shutting down executor...")
+        if hasattr(self, '_executor'):
+            self._executor.shutdown(wait=True)
+            print("[FoodAnalyzer] Executor shutdown complete")
+
+    def _run_food_classification_sync(self, image_path: str) -> tuple:
+        """음식 분류 실행 (동기)"""
+        print("[1/4] Running Food Classification...")
+        food_result = predict_single(self.food_model, image_path)
+        food_name = food_result.get('top1_class', 'Unknown')
+        confidence = food_result.get('top1_confidence', 0.0)
+        print(f"  → Detected: {food_name} (confidence: {confidence:.2%})")
+        return food_name, confidence
+
+    def _run_depth_estimation_sync(self, image_path: str) -> tuple:
+        """깊이 추정 실행 (동기)"""
+        print("[2/4] Generating Depth Map with Depth Pro...")
+        image, _, f_px = depth_pro.load_rgb(image_path)
+        image_tensor = self.depth_transform(image).to(self.device)
+
+        with torch.no_grad():
+            prediction = self.depth_model.infer(image_tensor, f_px=f_px)
+
+        depth_map = prediction["depth"].cpu().numpy()
+        focallength_px = prediction["focallength_px"]
+        f_px_val = focallength_px.item() if focallength_px is not None else None
+        print(f"  → Depth map shape: {depth_map.shape}")
+        if f_px_val:
+            print(f"  → Focal length (px): {f_px_val:.1f}")
+        return depth_map, f_px_val
+
+    def _run_volume_calculation_sync(self, depth_map, detected_refs, food_mask, bg_candidate_mask, food_name, f_px_val) -> tuple:
+        """부피 계산 실행 (동기)"""
+        print("[4/4] Calculating Volume...")
+
+        # 음식 마스크 검증
+        food_pixels = food_mask.sum()
+        print(f"  → Food mask pixels: {food_pixels}")
+        if food_pixels == 0:
+            print("  → ERROR: Food mask is empty! Volume will be 0")
+
+        ref_px_len, ref_real_cm, is_fallback = self._detect_reference_object(detected_refs)
+
+        density = self.nutrition_db.get_density(food_name)
+
+        vol_result = volume_calculation_core(
+            Z_scene=depth_map,
+            food_mask=food_mask,
+            bg_mask_candidate=bg_candidate_mask,
+            ref_px_len=ref_px_len,
+            ref_real_cm=ref_real_cm,
+            density_g_per_ml=density,
+            is_fallback_mode=is_fallback,
+            provided_f_px=f_px_val
+        )
+
+        print(f"  → Density: {density:.2f} g/ml")
+        print(f"  → Volume: {vol_result['volume_ml']:.1f} ml")
+        print(f"  → Mass: {vol_result['mass_g']:.1f} g")
+        print(f"  → Method: {vol_result['method']}")
+
+        nutrition = self._calculate_nutrition(food_name, vol_result['mass_g'])
+
+        return vol_result, nutrition
+
+    async def analyze_stream(self, image_path: str):
         """
         음식 이미지를 분석하면서 진행 상황을 스트리밍합니다.
 
@@ -113,84 +187,57 @@ class FoodAnalyzer:
         print(f"\n[FoodAnalyzer] Analyzing image (streaming): {image_path}")
         print("=" * 60)
 
-        try:
-            # Step 1: Food Classification
-            yield {"step": 1, "message": "음식 분류 중...", "status": "in_progress"}
-            print("[1/4] Running Food Classification...")
-            food_result = predict_single(self.food_model, image_path)
-            food_name = food_result.get('top1_class', 'Unknown')
-            confidence = food_result.get('top1_confidence', 0.0)
-            print(f"  → Detected: {food_name} (confidence: {confidence:.2%})")
+        async with self._lock:  # 동시성 제어
+            try:
+                # Step 1: Food Classification
+                yield {"step": 1, "message": "음식 분류 중...", "status": "in_progress"}
+                loop = asyncio.get_event_loop()
+                food_name, confidence = await loop.run_in_executor(
+                    self._executor, self._run_food_classification_sync, image_path
+                )
 
-            # Step 2: Depth Map 생성
-            yield {"step": 2, "message": "깊이 맵 생성 중...", "status": "in_progress"}
-            print("[2/4] Generating Depth Map with Depth Pro...")
-            image, _, f_px = depth_pro.load_rgb(image_path)
-            image_tensor = self.depth_transform(image).to(self.device)
+                # Step 2: Depth Map 생성
+                yield {"step": 2, "message": "깊이 맵 생성 중...", "status": "in_progress"}
+                depth_map, f_px_val = await loop.run_in_executor(
+                    self._executor, self._run_depth_estimation_sync, image_path
+                )
 
-            with torch.no_grad():
-                prediction = self.depth_model.infer(image_tensor, f_px=f_px)
+                # Step 3: YOLO Segmentation
+                yield {"step": 3, "message": "객체 분할 중...", "status": "in_progress"}
+                print("[3/4] Running YOLO Segmentation...")
+                detected_refs, food_mask, bg_candidate_mask = await loop.run_in_executor(
+                    self._executor, self._run_yolo_segmentation, image_path, depth_map.shape
+                )
 
-            depth_map = prediction["depth"].cpu().numpy()
-            focallength_px = prediction["focallength_px"]
-            f_px_val = focallength_px.item() if focallength_px is not None else None
-            print(f"  → Depth map shape: {depth_map.shape}")
-            if f_px_val:
-                print(f"  → Focal length (px): {f_px_val:.1f}")
+                # Step 4: 부피 계산 및 영양소 분석
+                yield {"step": 4, "message": "부피 계산 및 영양소 분석 중...", "status": "in_progress"}
+                vol_result, nutrition = await loop.run_in_executor(
+                    self._executor,
+                    self._run_volume_calculation_sync,
+                    depth_map, detected_refs, food_mask, bg_candidate_mask, food_name, f_px_val
+                )
 
-            # Step 3: YOLO Segmentation
-            yield {"step": 3, "message": "객체 분할 중...", "status": "in_progress"}
-            print("[3/4] Running YOLO Segmentation...")
-            detected_refs, food_mask, bg_candidate_mask = self._run_yolo_segmentation(
-                image_path, depth_map.shape
-            )
+                print("=" * 60)
+                print("[FoodAnalyzer] Analysis complete!\n")
 
-            # Step 4: 부피 계산 및 영양소 분석
-            yield {"step": 4, "message": "부피 계산 및 영양소 분석 중...", "status": "in_progress"}
-            print("[4/4] Calculating Volume...")
-            ref_px_len, ref_real_cm, is_fallback = self._detect_reference_object(detected_refs)
+                # 최종 결과 전송
+                result = {
+                    'food_name': food_name,
+                    'confidence': confidence,
+                    'volume_ml': vol_result['volume_ml'],
+                    'mass_g': vol_result['mass_g'],
+                    'nutrition': nutrition
+                }
 
-            density = self.nutrition_db.get_density(food_name)
+                yield {"status": "completed", "result": result}
 
-            vol_result = volume_calculation_core(
-                Z_scene=depth_map,
-                food_mask=food_mask,
-                bg_mask_candidate=bg_candidate_mask,
-                ref_px_len=ref_px_len,
-                ref_real_cm=ref_real_cm,
-                density_g_per_ml=density,
-                is_fallback_mode=is_fallback,
-                provided_f_px=f_px_val
-            )
+            except Exception as e:
+                print(f"[FoodAnalyzer] Error during analysis: {e}")
+                import traceback
+                traceback.print_exc()
+                yield {"status": "error", "message": str(e)}
 
-            print(f"  → Density: {density:.2f} g/ml")
-            print(f"  → Volume: {vol_result['volume_ml']:.1f} ml")
-            print(f"  → Mass: {vol_result['mass_g']:.1f} g")
-            print(f"  → Method: {vol_result['method']}")
-
-            nutrition = self._calculate_nutrition(food_name, vol_result['mass_g'])
-
-            print("=" * 60)
-            print("[FoodAnalyzer] Analysis complete!\n")
-
-            # 최종 결과 전송
-            result = {
-                'food_name': food_name,
-                'confidence': confidence,
-                'volume_ml': vol_result['volume_ml'],
-                'mass_g': vol_result['mass_g'],
-                'nutrition': nutrition
-            }
-
-            yield {"status": "completed", "result": result}
-
-        except Exception as e:
-            print(f"[FoodAnalyzer] Error during analysis: {e}")
-            import traceback
-            traceback.print_exc()
-            yield {"status": "error", "message": str(e)}
-
-    def analyze(self, image_path: str) -> dict:
+    async def analyze(self, image_path: str) -> dict:
         """
         음식 이미지를 분석하여 영양 정보를 추정합니다.
 
@@ -214,72 +261,42 @@ class FoodAnalyzer:
         print(f"\n[FoodAnalyzer] Analyzing image: {image_path}")
         print("=" * 60)
 
-        # Step 1: Food Classification
-        print("[1/4] Running Food Classification...")
-        food_result = predict_single(self.food_model, image_path)
-        food_name = food_result.get('top1_class', 'Unknown')
-        confidence = food_result.get('top1_confidence', 0.0)
-        print(f"  → Detected: {food_name} (confidence: {confidence:.2%})")
+        async with self._lock:  # 동시성 제어
+            loop = asyncio.get_event_loop()
 
-        # Step 2: Depth Map 생성
-        print("[2/4] Generating Depth Map with Depth Pro...")
-        image, _, f_px = depth_pro.load_rgb(image_path)
-        image_tensor = self.depth_transform(image).to(self.device)
+            # Step 1: Food Classification
+            food_name, confidence = await loop.run_in_executor(
+                self._executor, self._run_food_classification_sync, image_path
+            )
 
-        with torch.no_grad():
-            prediction = self.depth_model.infer(image_tensor, f_px=f_px)
+            # Step 2: Depth Map 생성
+            depth_map, f_px_val = await loop.run_in_executor(
+                self._executor, self._run_depth_estimation_sync, image_path
+            )
 
-        depth_map = prediction["depth"].cpu().numpy()
+            # Step 3: YOLO Segmentation
+            print("[3/4] Running YOLO Segmentation...")
+            detected_refs, food_mask, bg_candidate_mask = await loop.run_in_executor(
+                self._executor, self._run_yolo_segmentation, image_path, depth_map.shape
+            )
 
-        # Depth Pro의 초점거리 추출 (Fallback 모드에서 활용)
-        focallength_px = prediction["focallength_px"]
-        f_px_val = focallength_px.item() if focallength_px is not None else None
-        print(f"  → Depth map shape: {depth_map.shape}")
-        if f_px_val:
-            print(f"  → Focal length (px): {f_px_val:.1f}")
+            # Step 4: 레퍼런스 물체 확인 및 부피 계산
+            vol_result, nutrition = await loop.run_in_executor(
+                self._executor,
+                self._run_volume_calculation_sync,
+                depth_map, detected_refs, food_mask, bg_candidate_mask, food_name, f_px_val
+            )
 
-        # Step 3: YOLO Segmentation
-        print("[3/4] Running YOLO Segmentation...")
-        detected_refs, food_mask, bg_candidate_mask = self._run_yolo_segmentation(
-            image_path, depth_map.shape
-        )
+            print("=" * 60)
+            print("[FoodAnalyzer] Analysis complete!\n")
 
-        # Step 4: 레퍼런스 물체 확인 및 부피 계산
-        print("[4/4] Calculating Volume...")
-        ref_px_len, ref_real_cm, is_fallback = self._detect_reference_object(detected_refs)
-
-        # 음식별 밀도 조회 (DB 기반 또는 fallback)
-        density = self.nutrition_db.get_density(food_name)
-
-        vol_result = volume_calculation_core(
-            Z_scene=depth_map,
-            food_mask=food_mask,
-            bg_mask_candidate=bg_candidate_mask,
-            ref_px_len=ref_px_len,
-            ref_real_cm=ref_real_cm,
-            density_g_per_ml=density,  # DB에서 조회한 밀도 사용
-            is_fallback_mode=is_fallback,
-            provided_f_px=f_px_val  # Depth Pro 초점거리 전달
-        )
-
-        print(f"  → Density: {density:.2f} g/ml")
-        print(f"  → Volume: {vol_result['volume_ml']:.1f} ml")
-        print(f"  → Mass: {vol_result['mass_g']:.1f} g")
-        print(f"  → Method: {vol_result['method']}")
-
-        # Step 5: 영양소 계산 (DB 기반)
-        nutrition = self._calculate_nutrition(food_name, vol_result['mass_g'])
-
-        print("=" * 60)
-        print("[FoodAnalyzer] Analysis complete!\n")
-
-        return {
-            'food_name': food_name,
-            'confidence': confidence,
-            'volume_ml': vol_result['volume_ml'],
-            'mass_g': vol_result['mass_g'],
-            'nutrition': nutrition
-        }
+            return {
+                'food_name': food_name,
+                'confidence': confidence,
+                'volume_ml': vol_result['volume_ml'],
+                'mass_g': vol_result['mass_g'],
+                'nutrition': nutrition
+            }
 
     def _run_yolo_segmentation(self, image_path: str, depth_shape_hw: tuple) -> tuple:
         """
@@ -313,11 +330,15 @@ class FoodAnalyzer:
         max_area_per_cls = {}  # 클래스별 최대 면적
         food_mask_accum = np.zeros((H, W), dtype=bool)
         bg_candidate_mask = np.zeros((H, W), dtype=bool)
+        plate_mask_accum = np.zeros((H, W), dtype=bool)  # 접시/그릇 영역
+
+        detected_objects = []  # 디버깅용
 
         for mi, ci in zip(masks, clses):
             cls_name = names[ci]
             m_resized = cv2.resize(mi, (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
             current_area = m_resized.sum()
+            detected_objects.append(cls_name)
 
             if cls_name in self.FOOD_LIKE:
                 # 음식 마스크
@@ -333,6 +354,16 @@ class FoodAnalyzer:
             elif cls_name in self.PLATE_LIKE or cls_name == 'dining table':
                 # 배경 후보 (접시, 테이블 등)
                 bg_candidate_mask |= m_resized
+                if cls_name in {'bowl', 'plate'}:
+                    plate_mask_accum |= m_resized
+
+        # 디버깅: 감지된 객체 출력
+        print(f"  → Detected objects: {', '.join(detected_objects) if detected_objects else 'None'}")
+
+        # Fallback: 음식이 감지되지 않았지만 접시/그릇이 있으면 그 영역을 음식으로 간주
+        if food_mask_accum.sum() == 0 and plate_mask_accum.sum() > 0:
+            print("  → Warning: No food detected, using bowl/plate area as food mask")
+            food_mask_accum = plate_mask_accum
 
         return detected_refs, food_mask_accum, bg_candidate_mask
 

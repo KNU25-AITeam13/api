@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
     print("Shutting down AI API Server...")
 
     if hasattr(app.state, 'analyzer'):
+        app.state.analyzer.shutdown()
         del app.state.analyzer
 
     # GPU 메모리 정리
@@ -136,7 +137,7 @@ async def analyze_food(
         analyzer = request.app.state.analyzer
 
         try:
-            result = analyzer.analyze(temp_path)
+            result = await analyzer.analyze(temp_path)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -222,12 +223,10 @@ async def analyze_food_stream(
             analyzer = request.app.state.analyzer
 
             try:
-                for progress in analyzer.analyze_stream(temp_path):
+                async for progress in analyzer.analyze_stream(temp_path):
                     # SSE 형식으로 데이터 전송 (camelCase 변환)
                     camel_progress = dict_to_camel_case(progress)
                     yield f"data: {json.dumps(camel_progress)}\n\n"
-                    # 비동기 처리를 위한 짧은 대기
-                    await asyncio.sleep(0)
 
             except Exception as e:
                 import traceback
