@@ -155,7 +155,7 @@ class FoodAnalyzer:
             vol_result = volume_calculation_core(
                 Z_scene=depth_map,
                 food_mask=food_mask,
-                bg_candidate_mask=bg_candidate_mask,
+                bg_mask_candidate=bg_candidate_mask,
                 ref_px_len=ref_px_len,
                 ref_real_cm=ref_real_cm,
                 density_g_per_ml=density,
