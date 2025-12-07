@@ -63,8 +63,13 @@ uv run python -m ai.nutrition.nutrition_lookup
 # Health check
 curl http://localhost:8000/health
 
-# Analyze food image
+# Analyze food image (standard response)
 curl -X POST "http://localhost:8000/analyze" \
+  -H "Content-Type: multipart/form-data" \
+  -F "file=@food.jpg"
+
+# Analyze with progress streaming (SSE)
+curl -N -X POST "http://localhost:8000/analyze-stream" \
   -H "Content-Type: multipart/form-data" \
   -F "file=@food.jpg"
 ```
@@ -159,6 +164,25 @@ AnalysisResponse:
 
 Total: **14 nutrition fields** (4 required + 10 optional from Korean Food Nutrition DB)
 
+**JSON Response Format (camelCase)**:
+- All models use `alias_generator=to_camel` for automatic camelCase conversion
+- Python attributes remain snake_case, but JSON output is camelCase
+- Example response:
+```json
+{
+  "foodName": "비빔밥",
+  "confidence": 0.94,
+  "volumeMl": 350.50,
+  "massG": 350.50,
+  "nutrition": {
+    "caloriesKcal": 525.75,
+    "proteinG": 28.04,
+    "fatG": 17.53,
+    "carbsG": 87.63
+  }
+}
+```
+
 ### File Upload Flow
 
 **Request Handling** (`app/main.py` + `app/utils.py`):
@@ -166,6 +190,81 @@ Total: **14 nutrition fields** (4 required + 10 optional from Korean Food Nutrit
 2. Save to temp file with `aiofiles` (async, chunked)
 3. Run analysis pipeline
 4. Clean up temp file in `finally` block (guaranteed cleanup)
+
+### Progress Streaming (SSE)
+
+**Endpoint**: `POST /analyze-stream`
+
+Real-time progress updates via Server-Sent Events for frontend progress indicators.
+
+**Implementation** (`ai/pipeline.py:103` + `app/main.py:178`):
+```python
+# FoodAnalyzer.analyze_stream() - Generator pattern
+def analyze_stream(self, image_path: str):
+    yield {"step": 1, "message": "음식 분류 중...", "status": "in_progress"}
+    # ... run food classification
+
+    yield {"step": 2, "message": "깊이 맵 생성 중...", "status": "in_progress"}
+    # ... run depth estimation
+
+    yield {"step": 3, "message": "객체 분할 중...", "status": "in_progress"}
+    # ... run YOLO segmentation
+
+    yield {"step": 4, "message": "부피 계산 및 영양소 분석 중...", "status": "in_progress"}
+    # ... calculate volume and nutrition
+
+    yield {"status": "completed", "result": {...}}  # Final result
+```
+
+**SSE Response Format**:
+```
+data: {"step": 1, "message": "음식 분류 중...", "status": "in_progress"}
+
+data: {"step": 2, "message": "깊이 맵 생성 중...", "status": "in_progress"}
+
+data: {"step": 3, "message": "객체 분할 중...", "status": "in_progress"}
+
+data: {"step": 4, "message": "부피 계산 및 영양소 분석 중...", "status": "in_progress"}
+
+data: {"status": "completed", "result": {"foodName": "비빔밥", ...}}
+```
+
+**Client Integration** (JavaScript example):
+```javascript
+const response = await fetch('/analyze-stream', {
+  method: 'POST',
+  body: formData
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+
+while (true) {
+  const {done, value} = await reader.read();
+  if (done) break;
+
+  const text = decoder.decode(value);
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    if (line.startsWith('data: ')) {
+      const data = JSON.parse(line.slice(6));
+
+      if (data.status === 'in_progress') {
+        updateProgressBar(data.step, 4);  // Show progress (1-4/4)
+      } else if (data.status === 'completed') {
+        displayResult(data.result);
+      }
+    }
+  }
+}
+```
+
+**Key Features**:
+- Non-blocking: Client receives updates as each pipeline stage completes
+- Error handling: Errors streamed as `{"status": "error", "message": "..."}`
+- Automatic cleanup: Temp files cleaned up in `finally` block
+- camelCase output: All JSON keys converted via `dict_to_camel_case()` helper
 
 ## Important Implementation Details
 
