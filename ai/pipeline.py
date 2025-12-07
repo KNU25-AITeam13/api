@@ -65,10 +65,11 @@ class FoodAnalyzer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[FoodAnalyzer] Using device: {self.device}")
 
-        # 동시성 제어를 위한 Lock
-        self._lock = asyncio.Lock()
-        # Blocking 작업을 위한 ThreadPoolExecutor
-        self._executor = ThreadPoolExecutor(max_workers=1)
+        # CPU 병렬 처리를 위한 ThreadPoolExecutor
+        # CPU 코어 수만큼 동시 처리 가능 (기본값: 4)
+        max_workers = os.cpu_count() or 4
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        print(f"[FoodAnalyzer] ThreadPoolExecutor initialized with {max_workers} workers")
 
         # 0. Depth Pro 체크포인트 확인 및 다운로드
         checkpoint_path = self._ensure_depth_pro_checkpoint()
@@ -187,55 +188,54 @@ class FoodAnalyzer:
         print(f"\n[FoodAnalyzer] Analyzing image (streaming): {image_path}")
         print("=" * 60)
 
-        async with self._lock:  # 동시성 제어
-            try:
-                # Step 1: Food Classification
-                yield {"step": 1, "message": "음식 분류 중...", "status": "in_progress"}
-                loop = asyncio.get_event_loop()
-                food_name, confidence = await loop.run_in_executor(
-                    self._executor, self._run_food_classification_sync, image_path
-                )
+        try:
+            # Step 1: Food Classification
+            yield {"step": 1, "message": "음식 분류 중...", "status": "in_progress"}
+            loop = asyncio.get_event_loop()
+            food_name, confidence = await loop.run_in_executor(
+                self._executor, self._run_food_classification_sync, image_path
+            )
 
-                # Step 2: Depth Map 생성
-                yield {"step": 2, "message": "깊이 맵 생성 중...", "status": "in_progress"}
-                depth_map, f_px_val = await loop.run_in_executor(
-                    self._executor, self._run_depth_estimation_sync, image_path
-                )
+            # Step 2: Depth Map 생성
+            yield {"step": 2, "message": "깊이 맵 생성 중...", "status": "in_progress"}
+            depth_map, f_px_val = await loop.run_in_executor(
+                self._executor, self._run_depth_estimation_sync, image_path
+            )
 
-                # Step 3: YOLO Segmentation
-                yield {"step": 3, "message": "객체 분할 중...", "status": "in_progress"}
-                print("[3/4] Running YOLO Segmentation...")
-                detected_refs, food_mask, bg_candidate_mask = await loop.run_in_executor(
-                    self._executor, self._run_yolo_segmentation, image_path, depth_map.shape
-                )
+            # Step 3: YOLO Segmentation
+            yield {"step": 3, "message": "객체 분할 중...", "status": "in_progress"}
+            print("[3/4] Running YOLO Segmentation...")
+            detected_refs, food_mask, bg_candidate_mask = await loop.run_in_executor(
+                self._executor, self._run_yolo_segmentation, image_path, depth_map.shape
+            )
 
-                # Step 4: 부피 계산 및 영양소 분석
-                yield {"step": 4, "message": "부피 계산 및 영양소 분석 중...", "status": "in_progress"}
-                vol_result, nutrition = await loop.run_in_executor(
-                    self._executor,
-                    self._run_volume_calculation_sync,
-                    depth_map, detected_refs, food_mask, bg_candidate_mask, food_name, f_px_val
-                )
+            # Step 4: 부피 계산 및 영양소 분석
+            yield {"step": 4, "message": "부피 계산 및 영양소 분석 중...", "status": "in_progress"}
+            vol_result, nutrition = await loop.run_in_executor(
+                self._executor,
+                self._run_volume_calculation_sync,
+                depth_map, detected_refs, food_mask, bg_candidate_mask, food_name, f_px_val
+            )
 
-                print("=" * 60)
-                print("[FoodAnalyzer] Analysis complete!\n")
+            print("=" * 60)
+            print("[FoodAnalyzer] Analysis complete!\n")
 
-                # 최종 결과 전송
-                result = {
-                    'food_name': food_name,
-                    'confidence': confidence,
-                    'volume_ml': vol_result['volume_ml'],
-                    'mass_g': vol_result['mass_g'],
-                    'nutrition': nutrition
-                }
+            # 최종 결과 전송
+            result = {
+                'food_name': food_name,
+                'confidence': confidence,
+                'volume_ml': vol_result['volume_ml'],
+                'mass_g': vol_result['mass_g'],
+                'nutrition': nutrition
+            }
 
-                yield {"status": "completed", "result": result}
+            yield {"status": "completed", "result": result}
 
-            except Exception as e:
-                print(f"[FoodAnalyzer] Error during analysis: {e}")
-                import traceback
-                traceback.print_exc()
-                yield {"status": "error", "message": str(e)}
+        except Exception as e:
+            print(f"[FoodAnalyzer] Error during analysis: {e}")
+            import traceback
+            traceback.print_exc()
+            yield {"status": "error", "message": str(e)}
 
     async def analyze(self, image_path: str) -> dict:
         """
@@ -261,42 +261,41 @@ class FoodAnalyzer:
         print(f"\n[FoodAnalyzer] Analyzing image: {image_path}")
         print("=" * 60)
 
-        async with self._lock:  # 동시성 제어
-            loop = asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
 
-            # Step 1: Food Classification
-            food_name, confidence = await loop.run_in_executor(
-                self._executor, self._run_food_classification_sync, image_path
-            )
+        # Step 1: Food Classification
+        food_name, confidence = await loop.run_in_executor(
+            self._executor, self._run_food_classification_sync, image_path
+        )
 
-            # Step 2: Depth Map 생성
-            depth_map, f_px_val = await loop.run_in_executor(
-                self._executor, self._run_depth_estimation_sync, image_path
-            )
+        # Step 2: Depth Map 생성
+        depth_map, f_px_val = await loop.run_in_executor(
+            self._executor, self._run_depth_estimation_sync, image_path
+        )
 
-            # Step 3: YOLO Segmentation
-            print("[3/4] Running YOLO Segmentation...")
-            detected_refs, food_mask, bg_candidate_mask = await loop.run_in_executor(
-                self._executor, self._run_yolo_segmentation, image_path, depth_map.shape
-            )
+        # Step 3: YOLO Segmentation
+        print("[3/4] Running YOLO Segmentation...")
+        detected_refs, food_mask, bg_candidate_mask = await loop.run_in_executor(
+            self._executor, self._run_yolo_segmentation, image_path, depth_map.shape
+        )
 
-            # Step 4: 레퍼런스 물체 확인 및 부피 계산
-            vol_result, nutrition = await loop.run_in_executor(
-                self._executor,
-                self._run_volume_calculation_sync,
-                depth_map, detected_refs, food_mask, bg_candidate_mask, food_name, f_px_val
-            )
+        # Step 4: 레퍼런스 물체 확인 및 부피 계산
+        vol_result, nutrition = await loop.run_in_executor(
+            self._executor,
+            self._run_volume_calculation_sync,
+            depth_map, detected_refs, food_mask, bg_candidate_mask, food_name, f_px_val
+        )
 
-            print("=" * 60)
-            print("[FoodAnalyzer] Analysis complete!\n")
+        print("=" * 60)
+        print("[FoodAnalyzer] Analysis complete!\n")
 
-            return {
-                'food_name': food_name,
-                'confidence': confidence,
-                'volume_ml': vol_result['volume_ml'],
-                'mass_g': vol_result['mass_g'],
-                'nutrition': nutrition
-            }
+        return {
+            'food_name': food_name,
+            'confidence': confidence,
+            'volume_ml': vol_result['volume_ml'],
+            'mass_g': vol_result['mass_g'],
+            'nutrition': nutrition
+        }
 
     def _run_yolo_segmentation(self, image_path: str, depth_shape_hw: tuple) -> tuple:
         """
