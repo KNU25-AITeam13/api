@@ -12,12 +12,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install uv.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Copy the application into the container.
-COPY . /app
-
-# Install the application dependencies.
+# Set working directory
 WORKDIR /app
-RUN uv sync --locked --no-dev
+
+# Copy dependency files first (for layer caching)
+# Only re-run uv sync if these files change
+COPY pyproject.toml uv.lock ./
+
+# Install dependencies with cache mount for faster rebuilds
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev
+
+# Copy the rest of the application
+# Code changes won't invalidate the dependency layer
+COPY . /app
 
 # Download Depth Pro checkpoint (빌드 타임)
 # 이미 포함되어 있으면 스킵됨
