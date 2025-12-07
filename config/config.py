@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     yolo_seg_weights: str = "yolo11x-seg.pt"  # YOLOv11 Extra Large Segmentation
     food_model_weights: str = "ai/food_classification/models/best_mixed_food_v1.pt"
 
+    # 영양 데이터베이스 경로
+    nutrition_db_path: str = "ai/nutrition/nutrition.db"
+
     # 파일 업로드 설정
     max_upload_size_mb: int = 10
 

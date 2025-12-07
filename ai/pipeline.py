@@ -28,6 +28,9 @@ from volume_test import volume_calculation_core
 from ultralytics import YOLO
 from predict import predict_single
 
+# Nutrition database
+from ai.nutrition import NutritionDatabase
+
 
 class FoodAnalyzer:
     """음식 영양 분석 파이프라인"""
@@ -91,6 +94,10 @@ class FoodAnalyzer:
         print(f"[FoodAnalyzer] Loading Food Classification model from {food_model_path}...")
         self.food_model = YOLO(food_model_path)
 
+        # 4. Nutrition Database 로드
+        print("[FoodAnalyzer] Loading Nutrition Database...")
+        self.nutrition_db = NutritionDatabase()
+
         print("[FoodAnalyzer] All models loaded successfully!")
 
     def analyze(self, image_path: str) -> dict:
@@ -151,23 +158,27 @@ class FoodAnalyzer:
         print("[4/4] Calculating Volume...")
         ref_px_len, ref_real_cm, is_fallback = self._detect_reference_object(detected_refs)
 
+        # 음식별 밀도 조회 (DB 기반 또는 fallback)
+        density = self.nutrition_db.get_density(food_name)
+
         vol_result = volume_calculation_core(
             Z_scene=depth_map,
             food_mask=food_mask,
             bg_mask_candidate=bg_candidate_mask,
             ref_px_len=ref_px_len,
             ref_real_cm=ref_real_cm,
-            density_g_per_ml=1.0,  # 밀도 고정
+            density_g_per_ml=density,  # DB에서 조회한 밀도 사용
             is_fallback_mode=is_fallback,
             provided_f_px=f_px_val  # Depth Pro 초점거리 전달
         )
 
+        print(f"  → Density: {density:.2f} g/ml")
         print(f"  → Volume: {vol_result['volume_ml']:.1f} ml")
         print(f"  → Mass: {vol_result['mass_g']:.1f} g")
         print(f"  → Method: {vol_result['method']}")
 
-        # Step 5: 영양소 계산 (더미)
-        nutrition = self._calculate_nutrition_dummy(food_name, vol_result['mass_g'])
+        # Step 5: 영양소 계산 (DB 기반)
+        nutrition = self._calculate_nutrition(food_name, vol_result['mass_g'])
 
         print("=" * 60)
         print("[FoodAnalyzer] Analysis complete!\n")
@@ -321,33 +332,15 @@ class FoodAnalyzer:
 
         return checkpoint_path
 
-    def _calculate_nutrition_dummy(self, food_name: str, mass_g: float) -> dict:
+    def _calculate_nutrition(self, food_name: str, mass_g: float) -> dict:
         """
-        더미 영양소 데이터를 반환합니다.
-
-        향후 CSV 연동 시 실제 영양소 데이터로 교체 예정
+        CSV 데이터베이스에서 실제 영양소 정보를 조회합니다.
 
         Args:
-            food_name: 음식 이름
+            food_name: 음식 이름 (YOLO 클래스명)
             mass_g: 질량 (g)
 
         Returns:
-            영양소 정보
+            영양소 정보 (14개 필드: 4개 필수 + 10개 선택)
         """
-        # 100g당 평균 영양소 (대략적인 추정치)
-        base_nutrition = {
-            'calories_kcal': 150,
-            'protein_g': 8,
-            'fat_g': 5,
-            'carbs_g': 25
-        }
-
-        # 질량에 비례하여 조정
-        scale = mass_g / 100.0
-
-        return {
-            'calories_kcal': round(base_nutrition['calories_kcal'] * scale, 2),
-            'protein_g': round(base_nutrition['protein_g'] * scale, 2),
-            'fat_g': round(base_nutrition['fat_g'] * scale, 2),
-            'carbs_g': round(base_nutrition['carbs_g'] * scale, 2)
-        }
+        return self.nutrition_db.get_nutrition(food_name, mass_g)

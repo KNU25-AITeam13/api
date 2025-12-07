@@ -49,6 +49,15 @@ docker run -p 80:80 ai-api
 docker run --gpus all -p 80:80 ai-api
 ```
 
+### Nutrition Database
+```bash
+# Rebuild nutrition database from CSV (if updated)
+uv run python -m ai.nutrition.database_builder
+
+# Test nutrition lookup module
+uv run python -m ai.nutrition.nutrition_lookup
+```
+
 ### API Testing
 ```bash
 # Health check
@@ -74,11 +83,13 @@ Input Image
     ↓
 3. YOLO Segmentation → object masks (food, utensils, plates)
     ↓
-4. Reference Object Detection → scale calibration
+4. Density Lookup (NutritionDatabase) → density_g_per_ml
     ↓
-5. Volume Calculation → volume_ml, mass_g
+5. Reference Object Detection → scale calibration
     ↓
-6. Nutrition Estimation → calories, protein, fat, carbs
+6. Volume Calculation → volume_ml, mass_g (using food-specific density)
+    ↓
+7. Nutrition Lookup (NutritionDatabase) → 14 nutrition fields
 ```
 
 ### Model Loading Strategy
@@ -92,6 +103,7 @@ Input Image
 1. **Depth Pro** (`depth_pro.pt`, 1.8GB): Runtime auto-download if missing, or Docker build-time download
 2. **YOLO Segmentation** (`yolo11x-seg.pt`, ~155MB): Ultralytics auto-downloads on first use
 3. **Food Classification** (`best_mixed_food_v1.pt`, 25MB): Included in git repository
+4. **Nutrition Database** (`nutrition.db`, ~50KB): Pre-built SQLite DB, included in repository
 
 ### Volume Calculation Accuracy Hierarchy
 
@@ -114,6 +126,7 @@ The `volume_calculation_core` function uses `provided_f_px` parameter to pass De
 **Settings** (`config/config.py`):
 - Uses `pydantic-settings` for environment-based config
 - Model paths: `yolo_seg_weights`, `food_model_weights`
+- Nutrition database: `nutrition_db_path` (default: `ai/nutrition/nutrition.db`)
 - Supports `.env` file overrides
 
 ### Response Schema
@@ -126,11 +139,25 @@ AnalysisResponse:
   - volume_ml: float
   - mass_g: float
   - nutrition: NutritionInfo
+    # Required fields (4)
     - calories_kcal: float
     - protein_g: float
     - fat_g: float
     - carbs_g: float
+    # Optional fields (10) - from CSV database
+    - water_g: Optional[float]
+    - sugars_g: Optional[float]
+    - dietary_fiber_g: Optional[float]
+    - sodium_mg: Optional[float]
+    - cholesterol_mg: Optional[float]
+    - saturated_fat_g: Optional[float]
+    - calcium_mg: Optional[float]
+    - iron_mg: Optional[float]
+    - vitamin_a_ug: Optional[float]
+    - vitamin_c_mg: Optional[float]
 ```
+
+Total: **14 nutrition fields** (4 required + 10 optional from Korean Food Nutrition DB)
 
 ### File Upload Flow
 
@@ -162,15 +189,55 @@ The `yolo_inference` function in `volume_test.py` creates new YOLO instance each
 results = self.yolo_model(image_path, imgsz=640, conf=0.15, verbose=False)
 ```
 
-### Density Calculation
+### Nutrition Database Integration
 
-Currently fixed at 1.0 g/ml (water density). Future CSV integration planned:
+**Korean Food Nutrition Database** (`ai/nutrition/`):
+
+The system uses the official Korean food nutrition database (전국통합식품영양성분정보_음식_표준데이터.csv) integrated with YOLOv11's 39 food classes.
+
+**Database Structure**:
+- **Source CSV**: 14,582 food items from Korean Ministry of Food and Drug Safety
+- **Filtered SQLite DB**: 34 food classes (39 YOLO classes, 5 missing in CSV)
+- **Averaging Strategy**: Multiple food variants averaged per YOLO class
+- **Location**: `ai/nutrition/nutrition.db` (~50KB)
+
+**Density Calculation (3-Tier Strategy)**:
 ```python
 # ai/pipeline.py
-def _calculate_nutrition_dummy(self, food_name, mass_g):
-    # TODO: Replace with actual CSV lookup
-    # File: 전국통합식품영양성분정보_음식_표준데이터.csv
+density = self.nutrition_db.get_density(food_name)  # 0.19 ~ 1.41 g/ml
+
+# Tier 1: CSV-based calculation (best accuracy)
+#   - For 100ml basis: density = 100g / serving_weight
+#   - For 100g basis: water_ratio * 1.0 + (1 - water_ratio) * 1.5
+
+# Tier 2: Category-based defaults (fallback)
+#   - Rice dishes: 0.6 g/ml
+#   - Soups/stews: 1.0 g/ml
+#   - Noodles: 0.8 g/ml
+#   - Fried foods: 0.7 g/ml
+
+# Tier 3: Global default (final fallback)
+#   - 1.0 g/ml (water density)
 ```
+
+**Nutrition Lookup**:
+```python
+# ai/pipeline.py
+nutrition = self._calculate_nutrition(food_name, mass_g)
+# Returns 14 fields: 4 required + 10 optional from CSV
+```
+
+**Database Rebuild**:
+```bash
+# If CSV is updated, rebuild the database
+python -m ai.nutrition.database_builder
+```
+
+**Key Files**:
+- `ai/nutrition/food_name_mapping.py`: Maps 39 YOLO classes to CSV food names
+- `ai/nutrition/database_builder.py`: Builds SQLite from CSV (averages variants)
+- `ai/nutrition/nutrition_lookup.py`: `NutritionDatabase` class for queries
+- `ai/nutrition/nutrition.db`: SQLite database (34 food classes)
 
 ### PyTorch Installation
 

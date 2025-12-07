@@ -18,6 +18,7 @@ dependencies = [
     "numpy<2",
     "pillow-heif>=0.13.0",
     "matplotlib>=3.8.0",
+    "pandas>=2.3.3",
 ]
 
 [tool.uv]
